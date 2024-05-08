@@ -30,10 +30,20 @@ func middlewareLog(next http.Handler) http.Handler {
 	})
 }
 
+const metricsMsg string = `<html>
+
+<body>
+    <h1>Welcome, Chirpy Admin</h1>
+    <p>Chirpy has been visited %d times!</p>
+</body>
+
+</html>
+`
+
 func (cfg *apiConfig) metrics(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Add("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Add("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	msg := fmt.Sprintf("Hits: %d", cfg.fileserverHits)
+	msg := fmt.Sprintf(metricsMsg, cfg.fileserverHits)
 	w.Write([]byte(msg))
 }
 
@@ -51,9 +61,9 @@ func main() {
 
 	serverHandler := http.NewServeMux()
 	serverHandler.Handle("/app/*", http.StripPrefix("/app", middlewareLog(config.middlewareMetricsInc(http.FileServer(http.Dir("."))))))
-	serverHandler.HandleFunc("GET /metrics", config.metrics)
-	serverHandler.HandleFunc("/reset", config.reset)
-	serverHandler.HandleFunc("GET /healthz", status)
+	serverHandler.HandleFunc("GET /admin/metrics", config.metrics)
+	serverHandler.HandleFunc("GET /api/reset", config.reset)
+	serverHandler.HandleFunc("GET /api/healthz", status)
 
 	server := http.Server{Handler: serverHandler, Addr: ":" + port}
 
