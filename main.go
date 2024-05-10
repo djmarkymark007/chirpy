@@ -9,6 +9,8 @@ import (
 	"os"
 	"strconv"
 
+	"golang.org/x/crypto/bcrypt"
+
 	"github.com/djmarkymark007/chirpy/internal/database"
 	"github.com/djmarkymark007/chirpy/internal/validate"
 )
@@ -50,12 +52,8 @@ func respondWithJson(w http.ResponseWriter, code int, payload interface{}) {
 	w.Write(data)
 }
 
-func postUsers(w http.ResponseWriter, r *http.Request) {
-	type parameters struct {
-		Email string `json:"email"`
-	}
-
-	params := parameters{}
+func postLogin(w http.ResponseWriter, r *http.Request) {
+	params := User{}
 	decoder := json.NewDecoder(r.Body)
 	err := decoder.Decode(&params)
 	if err != nil {
@@ -63,7 +61,54 @@ func postUsers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	email, err := db.CreateUser(params.Email)
+	user, err := db.GetUser(params.Email)
+	if err != nil {
+		log.Printf("postLogin: %s\n", err)
+		respondWithError(w, 500, "failed to decode JSON")
+		return
+	}
+
+	if bcrypt.CompareHashAndPassword(user.PasswordHash, []byte(params.Password)) != nil {
+		respondWithError(w, 401, "Unauthorized")
+		return
+	}
+
+	respondWithJson(w, 200, database.User{Id: user.Id, Email: user.Email})
+}
+
+// TODO(Mark): Not sure if i like this
+type User struct {
+	Password string `json:"password"`
+	Email    string `json:"email"`
+}
+
+func postUsers(w http.ResponseWriter, r *http.Request) {
+	params := User{}
+	decoder := json.NewDecoder(r.Body)
+	err := decoder.Decode(&params)
+	if err != nil {
+		respondWithError(w, 500, "failed to decode JSON")
+		return
+	}
+
+	alreadyExist, err := db.UserExist(params.Email)
+	if err != nil {
+		respondWithError(w, 500, "something went wrong")
+		return
+	}
+
+	if alreadyExist {
+		respondWithError(w, 401, "user email already used")
+		return
+	}
+
+	passwordHash, err := bcrypt.GenerateFromPassword([]byte(params.Password), bcrypt.DefaultCost)
+	if err != nil {
+		//should you say what went wrong?
+		respondWithError(w, 500, "failed to Hash password")
+		return
+	}
+	email, err := db.CreateUser(params.Email, passwordHash)
 	if err != nil {
 		log.Println(err)
 		respondWithError(w, 500, "something went wrong")
@@ -207,6 +252,7 @@ func main() {
 	serverHandler.HandleFunc("POST /api/chirps", postChirps)
 	serverHandler.HandleFunc("GET /api/chirps/{chirpID}", getChirp)
 	serverHandler.HandleFunc("POST /api/users", postUsers)
+	serverHandler.HandleFunc("POST /api/login", postLogin)
 
 	server := http.Server{Handler: serverHandler, Addr: ":" + port}
 

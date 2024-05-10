@@ -18,14 +18,20 @@ type User struct {
 	Id    int    `json:"id"`
 }
 
+type UserDatabase struct {
+	Email        string `json:"email"`
+	Id           int    `json:"id"`
+	PasswordHash []byte `json:"password_hash"`
+}
+
 type Database struct {
 	path string
 	mu   *sync.RWMutex
 }
 
 type DBStructure struct {
-	Chirps map[int]Chirp `json:"chirps"`
-	Users  map[int]User  `json:"users"`
+	Chirps map[int]Chirp        `json:"chirps"`
+	Users  map[int]UserDatabase `json:"users"`
 }
 
 func (dbs *DBStructure) len() int {
@@ -75,20 +81,63 @@ func (db *Database) CreateChirp(body string) (Chirp, error) {
 	return newChirp, nil
 }
 
-func (db *Database) CreateUser(email string) (User, error) {
+func (db *Database) CreateUser(email string, passwordHash []byte) (User, error) {
 	data, err := db.loadDB()
 	if err != nil {
 		return User{}, err
 	}
 
-	newUser := User{Id: data.len() + 1, Email: email}
+	newUser := UserDatabase{Id: data.len() + 1, Email: email, PasswordHash: passwordHash}
 	data.Users[data.len()] = newUser
 	err = db.writeDB(data)
 	if err != nil {
 		return User{}, err
 	}
 
-	return newUser, nil
+	//NOTE(Mark): i don' t like having to struct on for the database and on for the return
+	return User{Id: newUser.Id, Email: newUser.Email}, nil
+}
+
+func (db *Database) UserExist(email string) (bool, error) {
+	user, err := db.GetUser(email)
+	if err != nil {
+		return false, err
+	}
+
+	if user.Email != email {
+		return false, nil
+	}
+
+	return true, nil
+}
+
+func (db *Database) GetUser(email string) (UserDatabase, error) {
+	users, err := db.GetUsers()
+	if err != nil {
+		return UserDatabase{}, fmt.Errorf("failed to get users to check if a user exist. %s", err)
+	}
+
+	for _, value := range users {
+		if email == value.Email {
+			return value, nil
+		}
+	}
+
+	return UserDatabase{}, nil
+}
+
+func (db *Database) GetUsers() ([]UserDatabase, error) {
+	data, err := db.loadDB()
+	if err != nil {
+		return []UserDatabase{}, err
+	}
+	var result []UserDatabase
+
+	for _, value := range data.Users {
+		result = append(result, value)
+	}
+
+	return result, nil
 }
 
 func (db *Database) GetChirps() ([]Chirp, error) {
@@ -109,6 +158,8 @@ func (db *Database) loadDB() (DBStructure, error) {
 	db.mu.Lock()
 	defer db.mu.Unlock()
 
+	result := DBStructure{Chirps: make(map[int]Chirp), Users: make(map[int]UserDatabase)}
+
 	db.ensureDB()
 
 	data, err := os.ReadFile(db.path)
@@ -116,7 +167,10 @@ func (db *Database) loadDB() (DBStructure, error) {
 		return DBStructure{}, fmt.Errorf("error loading database. path: %s, error: %s", db.path, err)
 	}
 
-	result := DBStructure{Chirps: make(map[int]Chirp), Users: make(map[int]User)}
+	if len(data) == 0 {
+		return result, nil
+	}
+
 	err = json.Unmarshal(data, &result)
 	if err != nil {
 		return DBStructure{}, errors.New("failed to decode json data")
