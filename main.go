@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -58,7 +60,7 @@ func respondWithJson(w http.ResponseWriter, code int, payload interface{}) {
 }
 
 func updateUser(w http.ResponseWriter, r *http.Request) {
-	log.Print("updateUser: ")
+	log.Print("--- updateUser ---")
 	params := User{}
 	decoder := json.NewDecoder(r.Body)
 	err := decoder.Decode(&params)
@@ -68,10 +70,8 @@ func updateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	header := r.Header.Get("Authorization")
-	token := strings.Split(header, " ")
-	log.Print(token[len(token)-1])
-	claims, err := jwt.ParseWithClaims(token[len(token)-1], &jwt.RegisteredClaims{}, func(token *jwt.Token) (interface{}, error) {
+	token := getTokenFromHeader(r)
+	claims, err := jwt.ParseWithClaims(token, &jwt.RegisteredClaims{}, func(token *jwt.Token) (interface{}, error) {
 		if token.Method != jwt.SigningMethodHS256 {
 			// Not sure if this should be fatal or not
 			log.Fatalf("Token Method: %v want: %v", token.Method, jwt.SigningMethodHS256)
@@ -106,13 +106,54 @@ func updateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	db.UpdateUser(database.UserDatabase{Id: id, Email: params.Email, PasswordHash: passwordHash})
+	user, err := db.GetUserById(id)
+	if err != nil {
+		log.Print(err)
+		respondWithError(w, 500, "Something went wrong")
+		return
+	}
+
+	user.Email = params.Email
+	user.PasswordHash = passwordHash
+
+	err = db.UpdateUser(user)
+	if err != nil {
+		log.Print(err)
+		respondWithError(w, 500, "Something went wrong")
+		return
+	}
 
 	respondWithJson(w, 200, database.User{Id: id, Email: params.Email})
 }
 
+func CreateJwt(id int, expiresRequest int) (string, error) {
+	expires := 60 * 60
+	if expiresRequest < expires && expiresRequest != 0 {
+		expires = expiresRequest
+	}
+
+	claim := jwt.RegisteredClaims{Issuer: "chirpy",
+		IssuedAt:  jwt.NewNumericDate(time.Now().UTC()),
+		ExpiresAt: jwt.NewNumericDate(time.Now().UTC().Add(time.Duration(expires * int(time.Second)))),
+		Subject:   fmt.Sprint(id)}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claim)
+	jwtToken, err := token.SignedString([]byte(config.jwtSecret))
+	if err != nil {
+		return "", err
+	}
+	return jwtToken, nil
+}
+
+func getTokenFromHeader(r *http.Request) string {
+	authorization := r.Header.Get("Authorization")
+	authorizationParts := strings.Split(authorization, " ")
+	token := authorizationParts[len(authorizationParts)-1]
+	return token
+}
+
 func postLogin(w http.ResponseWriter, r *http.Request) {
-	log.Print("postLogin: ")
+	log.Print("--- postLogin ---")
 	type parameters struct {
 		Password         string `json:"password"`
 		Email            string `json:"email"`
@@ -139,22 +180,26 @@ func postLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("recived expires in seconds: %v\n", params.ExpiresInSeconds)
-	expires := 24 * 60 * 60
-	if params.ExpiresInSeconds < expires && params.ExpiresInSeconds != 0 {
-		expires = params.ExpiresInSeconds
+	jwtToken, err := CreateJwt(user.Id, params.ExpiresInSeconds)
+	if err != nil {
+		log.Print(err)
+		respondWithError(w, 500, "something went wrong")
+		return
 	}
-	log.Printf("expires in seconds: %v\n", expires)
 
-	log.Printf("now: %v", time.Now().UTC())
-	log.Printf("expires: %v", time.Now().UTC().Add(time.Duration(expires*int(time.Second))))
-	claim := jwt.RegisteredClaims{Issuer: "chirpy",
-		IssuedAt:  jwt.NewNumericDate(time.Now().UTC()),
-		ExpiresAt: jwt.NewNumericDate(time.Now().UTC().Add(time.Duration(expires * int(time.Second)))),
-		Subject:   fmt.Sprint(user.Id)}
+	var rndValue [32]byte
+	_, err = rand.Read(rndValue[:])
+	if err != nil {
+		log.Print(err)
+		respondWithError(w, 500, "something went wrong")
+		return
+	}
 
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claim)
-	jwtToken, err := token.SignedString([]byte(config.jwtSecret))
+	refreshToken := hex.EncodeToString(rndValue[:])
+
+	user.RefreshToken = refreshToken
+	user.TokenExpiresAt = time.Now().UTC().Add(60 * 24 * time.Hour)
+	err = db.UpdateUser(user)
 	if err != nil {
 		log.Print(err)
 		respondWithError(w, 500, "something went wrong")
@@ -162,12 +207,97 @@ func postLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type UserWithjwt struct {
-		Id    int    `json:"id"`
-		Email string `json:"email"`
-		Token string `json:"token"`
+		Id           int    `json:"id"`
+		Email        string `json:"email"`
+		Token        string `json:"token"`
+		RefreshToken string `json:"refresh_token"`
 	}
 
-	respondWithJson(w, 200, UserWithjwt{Id: user.Id, Email: user.Email, Token: jwtToken})
+	respondWithJson(w, 200, UserWithjwt{Id: user.Id, Email: user.Email, Token: jwtToken, RefreshToken: refreshToken})
+}
+
+func refreshJWT(w http.ResponseWriter, r *http.Request) {
+	log.Print("--- refreshJWT ---")
+	token := getTokenFromHeader(r)
+
+	users, err := db.GetUsers()
+	if err != nil {
+		log.Print(err)
+		respondWithError(w, 500, "something went wrong")
+		return
+	}
+
+	validToken := false
+	var currentUser database.UserDatabase
+
+	for _, user := range users {
+		if user.RefreshToken == token {
+			if user.TokenExpiresAt.After(time.Now().UTC()) {
+				validToken = true
+				currentUser = user
+			} else {
+				log.Print("time miss match")
+			}
+			break
+		}
+	}
+
+	jwtToken := ""
+	if validToken {
+		jwtToken, err = CreateJwt(currentUser.Id, 0)
+		if err != nil {
+			log.Print(err)
+			respondWithError(w, 500, "something went wrong")
+			return
+		}
+	} else {
+		respondWithError(w, 401, "Unauthorized")
+		return
+	}
+
+	type TokenType struct {
+		JwtToken string `json:"token"`
+	}
+
+	respondWithJson(w, 200, TokenType{JwtToken: jwtToken})
+}
+
+func revokeToken(w http.ResponseWriter, r *http.Request) {
+	log.Print("--- revokeToken ---")
+
+	token := getTokenFromHeader(r)
+	users, err := db.GetUsers()
+	if err != nil {
+		log.Print(err)
+		respondWithError(w, 500, "something went wrong")
+		return
+	}
+
+	valid := false
+	currentUser := database.UserDatabase{}
+	for _, user := range users {
+		if user.RefreshToken == token {
+			currentUser = user
+			valid = true
+			break
+		}
+	}
+
+	if !valid {
+		respondWithError(w, 401, "Unauthorized")
+		return
+	}
+
+	currentUser.RefreshToken = ""
+	currentUser.TokenExpiresAt = time.Time{}
+	err = db.UpdateUser(currentUser)
+	if err != nil {
+		log.Print(err)
+		respondWithError(w, 500, "something went wrong")
+		return
+	}
+
+	respondWithJson(w, 204, "")
 }
 
 // TODO(Mark): Not sure if i like this
@@ -177,7 +307,7 @@ type User struct {
 }
 
 func postUsers(w http.ResponseWriter, r *http.Request) {
-	log.Print("postUsers: ")
+	log.Print("--- postUsers ---")
 	params := User{}
 	decoder := json.NewDecoder(r.Body)
 	err := decoder.Decode(&params)
@@ -213,7 +343,7 @@ func postUsers(w http.ResponseWriter, r *http.Request) {
 }
 
 func postChirps(w http.ResponseWriter, r *http.Request) {
-	log.Print("postChirps: ")
+	log.Print("--- postChirps ---")
 	type parameters struct {
 		Body string `json:"body"`
 	}
@@ -241,7 +371,7 @@ func postChirps(w http.ResponseWriter, r *http.Request) {
 }
 
 func getChirps(w http.ResponseWriter, r *http.Request) {
-	log.Print("getChirps: ")
+	log.Print("--- getChirps ---")
 	chirps, err := db.GetChirps()
 	if err != nil {
 		log.Print(err)
@@ -252,7 +382,7 @@ func getChirps(w http.ResponseWriter, r *http.Request) {
 }
 
 func getChirp(w http.ResponseWriter, r *http.Request) {
-	log.Print("getChirp: ")
+	log.Print("--- getChirp ---")
 	path := r.PathValue("chirpID")
 	fmt.Println(path)
 	value, err := strconv.Atoi(path)
@@ -358,6 +488,8 @@ func main() {
 	serverHandler.HandleFunc("POST /api/users", postUsers)
 	serverHandler.HandleFunc("POST /api/login", postLogin)
 	serverHandler.HandleFunc("PUT /api/users", updateUser)
+	serverHandler.HandleFunc("POST /api/refresh", refreshJWT)
+	serverHandler.HandleFunc("POST /api/revoke", revokeToken)
 
 	server := http.Server{Handler: serverHandler, Addr: ":" + port}
 

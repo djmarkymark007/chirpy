@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"time"
 )
 
 type Chirp struct {
@@ -19,9 +20,11 @@ type User struct {
 }
 
 type UserDatabase struct {
-	Email        string `json:"email"`
-	Id           int    `json:"id"`
-	PasswordHash []byte `json:"password_hash"`
+	Email          string    `json:"email"`
+	Id             int       `json:"id"`
+	PasswordHash   []byte    `json:"password_hash"`
+	RefreshToken   string    `json:"refresh_token"`
+	TokenExpiresAt time.Time `json:"token_expires_at"`
 }
 
 type Database struct {
@@ -87,7 +90,7 @@ func (db *Database) UpdateUser(userChange UserDatabase) error {
 		return err
 	}
 
-	data.Users[userChange.Id-1] = UserDatabase{Id: userChange.Id, Email: userChange.Email, PasswordHash: userChange.PasswordHash}
+	data.Users[userChange.Id-1] = userChange
 
 	err = db.writeDB(data)
 	if err != nil {
@@ -134,6 +137,21 @@ func (db *Database) GetUser(email string) (UserDatabase, error) {
 
 	for _, value := range users {
 		if email == value.Email {
+			return value, nil
+		}
+	}
+
+	return UserDatabase{}, nil
+}
+
+func (db *Database) GetUserById(id int) (UserDatabase, error) {
+	users, err := db.GetUsers()
+	if err != nil {
+		return UserDatabase{}, fmt.Errorf("failed to get users to check if a user exist. %s", err)
+	}
+
+	for _, value := range users {
+		if id == value.Id {
 			return value, nil
 		}
 	}
