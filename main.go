@@ -8,7 +8,11 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
+	"time"
 
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/joho/godotenv"
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/djmarkymark007/chirpy/internal/database"
@@ -16,6 +20,7 @@ import (
 )
 
 var db *database.Database
+var config apiConfig
 
 // TODO(Mark): custom 404 page
 func status(w http.ResponseWriter, r *http.Request) {
@@ -52,8 +57,69 @@ func respondWithJson(w http.ResponseWriter, code int, payload interface{}) {
 	w.Write(data)
 }
 
-func postLogin(w http.ResponseWriter, r *http.Request) {
+func updateUser(w http.ResponseWriter, r *http.Request) {
+	log.Print("updateUser: ")
 	params := User{}
+	decoder := json.NewDecoder(r.Body)
+	err := decoder.Decode(&params)
+	if err != nil {
+		log.Print(err)
+		respondWithError(w, 500, "Something went wrong")
+		return
+	}
+
+	header := r.Header.Get("Authorization")
+	token := strings.Split(header, " ")
+	log.Print(token[len(token)-1])
+	claims, err := jwt.ParseWithClaims(token[len(token)-1], &jwt.RegisteredClaims{}, func(token *jwt.Token) (interface{}, error) {
+		if token.Method != jwt.SigningMethodHS256 {
+			// Not sure if this should be fatal or not
+			log.Fatalf("Token Method: %v want: %v", token.Method, jwt.SigningMethodHS256)
+		}
+		return []byte(config.jwtSecret), nil
+	})
+
+	if err != nil {
+		log.Print(err)
+		respondWithError(w, 401, "Unathorized")
+		return
+	}
+
+	idString, err := claims.Claims.GetSubject()
+	if err != nil {
+		log.Print(err)
+		respondWithError(w, 401, "Unathorized")
+		return
+	}
+
+	id, err := strconv.Atoi(idString)
+	if err != nil {
+		log.Print(err)
+		respondWithError(w, 401, "Unathorized")
+		return
+	}
+
+	passwordHash, err := bcrypt.GenerateFromPassword([]byte(params.Password), bcrypt.DefaultCost)
+	if err != nil {
+		log.Print(err)
+		respondWithError(w, 500, "Something went wrong")
+		return
+	}
+
+	db.UpdateUser(database.UserDatabase{Id: id, Email: params.Email, PasswordHash: passwordHash})
+
+	respondWithJson(w, 200, database.User{Id: id, Email: params.Email})
+}
+
+func postLogin(w http.ResponseWriter, r *http.Request) {
+	log.Print("postLogin: ")
+	type parameters struct {
+		Password         string `json:"password"`
+		Email            string `json:"email"`
+		ExpiresInSeconds int    `json:"expires_in_seconds"`
+	}
+
+	params := parameters{}
 	decoder := json.NewDecoder(r.Body)
 	err := decoder.Decode(&params)
 	if err != nil {
@@ -73,7 +139,35 @@ func postLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	respondWithJson(w, 200, database.User{Id: user.Id, Email: user.Email})
+	log.Printf("recived expires in seconds: %v\n", params.ExpiresInSeconds)
+	expires := 24 * 60 * 60
+	if params.ExpiresInSeconds < expires && params.ExpiresInSeconds != 0 {
+		expires = params.ExpiresInSeconds
+	}
+	log.Printf("expires in seconds: %v\n", expires)
+
+	log.Printf("now: %v", time.Now().UTC())
+	log.Printf("expires: %v", time.Now().UTC().Add(time.Duration(expires*int(time.Second))))
+	claim := jwt.RegisteredClaims{Issuer: "chirpy",
+		IssuedAt:  jwt.NewNumericDate(time.Now().UTC()),
+		ExpiresAt: jwt.NewNumericDate(time.Now().UTC().Add(time.Duration(expires * int(time.Second)))),
+		Subject:   fmt.Sprint(user.Id)}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claim)
+	jwtToken, err := token.SignedString([]byte(config.jwtSecret))
+	if err != nil {
+		log.Print(err)
+		respondWithError(w, 500, "something went wrong")
+		return
+	}
+
+	type UserWithjwt struct {
+		Id    int    `json:"id"`
+		Email string `json:"email"`
+		Token string `json:"token"`
+	}
+
+	respondWithJson(w, 200, UserWithjwt{Id: user.Id, Email: user.Email, Token: jwtToken})
 }
 
 // TODO(Mark): Not sure if i like this
@@ -83,6 +177,7 @@ type User struct {
 }
 
 func postUsers(w http.ResponseWriter, r *http.Request) {
+	log.Print("postUsers: ")
 	params := User{}
 	decoder := json.NewDecoder(r.Body)
 	err := decoder.Decode(&params)
@@ -104,8 +199,8 @@ func postUsers(w http.ResponseWriter, r *http.Request) {
 
 	passwordHash, err := bcrypt.GenerateFromPassword([]byte(params.Password), bcrypt.DefaultCost)
 	if err != nil {
-		//should you say what went wrong?
-		respondWithError(w, 500, "failed to Hash password")
+		log.Print(err)
+		respondWithError(w, 500, "Something went wrong")
 		return
 	}
 	email, err := db.CreateUser(params.Email, passwordHash)
@@ -118,6 +213,7 @@ func postUsers(w http.ResponseWriter, r *http.Request) {
 }
 
 func postChirps(w http.ResponseWriter, r *http.Request) {
+	log.Print("postChirps: ")
 	type parameters struct {
 		Body string `json:"body"`
 	}
@@ -145,6 +241,7 @@ func postChirps(w http.ResponseWriter, r *http.Request) {
 }
 
 func getChirps(w http.ResponseWriter, r *http.Request) {
+	log.Print("getChirps: ")
 	chirps, err := db.GetChirps()
 	if err != nil {
 		log.Print(err)
@@ -155,6 +252,7 @@ func getChirps(w http.ResponseWriter, r *http.Request) {
 }
 
 func getChirp(w http.ResponseWriter, r *http.Request) {
+	log.Print("getChirp: ")
 	path := r.PathValue("chirpID")
 	fmt.Println(path)
 	value, err := strconv.Atoi(path)
@@ -185,6 +283,7 @@ func getChirp(w http.ResponseWriter, r *http.Request) {
 
 type apiConfig struct {
 	fileserverHits int
+	jwtSecret      string
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -228,6 +327,14 @@ func main() {
 	const port = "8080"
 	const filepathRoot = "."
 	const path = "database.json"
+	var err error
+
+	err = godotenv.Load()
+	if err != nil {
+		log.Fatalf("Error loading .env file: %s", err)
+	}
+
+	config = apiConfig{fileserverHits: 0, jwtSecret: os.Getenv("JWT_SECRET")}
 
 	dbg := flag.Bool("debug", false, "Enable debug mode")
 	flag.Parse()
@@ -235,13 +342,10 @@ func main() {
 		os.Remove(path)
 	}
 
-	var err error
 	db, err = database.NewDB(path)
 	if err != nil {
 		log.Fatal(err)
 	}
-
-	config := apiConfig{fileserverHits: 0}
 
 	serverHandler := http.NewServeMux()
 	serverHandler.Handle("/app/*", http.StripPrefix("/app", middlewareLog(config.middlewareMetricsInc(http.FileServer(http.Dir("."))))))
@@ -253,6 +357,7 @@ func main() {
 	serverHandler.HandleFunc("GET /api/chirps/{chirpID}", getChirp)
 	serverHandler.HandleFunc("POST /api/users", postUsers)
 	serverHandler.HandleFunc("POST /api/login", postLogin)
+	serverHandler.HandleFunc("PUT /api/users", updateUser)
 
 	server := http.Server{Handler: serverHandler, Addr: ":" + port}
 

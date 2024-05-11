@@ -81,6 +81,21 @@ func (db *Database) CreateChirp(body string) (Chirp, error) {
 	return newChirp, nil
 }
 
+func (db *Database) UpdateUser(userChange UserDatabase) error {
+	data, err := db.loadDB()
+	if err != nil {
+		return err
+	}
+
+	data.Users[userChange.Id-1] = UserDatabase{Id: userChange.Id, Email: userChange.Email, PasswordHash: userChange.PasswordHash}
+
+	err = db.writeDB(data)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
 func (db *Database) CreateUser(email string, passwordHash []byte) (User, error) {
 	data, err := db.loadDB()
 	if err != nil {

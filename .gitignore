@@ -2,3 +2,4 @@ chirpy
 database.json
 testDatabase.json
 launch.json
+.env
