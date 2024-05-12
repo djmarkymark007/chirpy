@@ -296,6 +296,10 @@ func postChirps(w http.ResponseWriter, r *http.Request) {
 	}
 
 	userId, err := authorize.GetIdFromJwt(token, config.jwtSecret)
+	if err != nil {
+		log.Print(err)
+		respondWithError(w, 401, "Unauthorized")
+	}
 
 	type parameters struct {
 		Body string `json:"body"`
