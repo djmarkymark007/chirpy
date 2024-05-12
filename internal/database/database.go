@@ -10,8 +10,9 @@ import (
 )
 
 type Chirp struct {
-	Id   int    `json:"id"`
-	Body string `json:"body"`
+	Id       int    `json:"id"`
+	Body     string `json:"body"`
+	AuthorId int    `json:"author_id"`
 }
 
 type User struct {
@@ -37,6 +38,7 @@ type DBStructure struct {
 	Users  map[int]UserDatabase `json:"users"`
 }
 
+// NOTE(Mark): not sure if this is need
 func (dbs *DBStructure) len() int {
 	return len(dbs.Chirps) + len(dbs.Users)
 }
@@ -69,19 +71,19 @@ func (db *Database) ensureDB() error {
 	return nil
 }
 
-func (db *Database) CreateChirp(body string) (Chirp, error) {
+func (db *Database) CreateChirp(chirp Chirp) (Chirp, error) {
 	data, err := db.loadDB()
 	if err != nil {
 		return Chirp{}, err
 	}
-	newChirp := Chirp{Id: data.len() + 1, Body: body}
-	data.Chirps[data.len()] = newChirp
+	chirp.Id = len(data.Chirps) + 1
+	data.Chirps[len(data.Chirps)] = chirp
 	err = db.writeDB(data)
 	if err != nil {
 		return Chirp{}, err
 	}
 
-	return newChirp, nil
+	return chirp, nil
 }
 
 func (db *Database) UpdateUser(userChange UserDatabase) error {
@@ -99,14 +101,54 @@ func (db *Database) UpdateUser(userChange UserDatabase) error {
 	return nil
 }
 
+func (db *Database) DeleteChirp(chripId int) error {
+	data, err := db.loadDB()
+	if err != nil {
+		return err
+	}
+
+	delete(data.Chirps, chripId-1)
+
+	for index, chirp := range data.Chirps {
+		if chirp.Id < chripId {
+			chripId--
+			data.Chirps[index] = chirp
+		}
+	}
+
+	err = db.writeDB(data)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (db *Database) GetChirpById(id int) (Chirp, error) {
+	foundChirp := Chirp{}
+	chirps, err := db.GetChirps()
+	if err != nil {
+		return foundChirp, err
+	}
+
+	for _, chirp := range chirps {
+		if chirp.Id == id {
+			foundChirp = chirp
+			break
+		}
+	}
+
+	return foundChirp, nil
+}
+
 func (db *Database) CreateUser(email string, passwordHash []byte) (User, error) {
 	data, err := db.loadDB()
 	if err != nil {
 		return User{}, err
 	}
 
-	newUser := UserDatabase{Id: data.len() + 1, Email: email, PasswordHash: passwordHash}
-	data.Users[data.len()] = newUser
+	newUser := UserDatabase{Id: len(data.Users) + 1, Email: email, PasswordHash: passwordHash}
+	data.Users[len(data.Users)] = newUser
 	err = db.writeDB(data)
 	if err != nil {
 		return User{}, err

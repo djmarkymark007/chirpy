@@ -1,8 +1,6 @@
 package main
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -13,16 +11,18 @@ import (
 	"strings"
 	"time"
 
-	"github.com/golang-jwt/jwt/v5"
 	"github.com/joho/godotenv"
 	"golang.org/x/crypto/bcrypt"
 
+	"github.com/djmarkymark007/chirpy/internal/authorize"
 	"github.com/djmarkymark007/chirpy/internal/database"
 	"github.com/djmarkymark007/chirpy/internal/validate"
 )
 
 var db *database.Database
 var config apiConfig
+
+const InternalErrorMsg = "Something went wrong"
 
 // TODO(Mark): custom 404 page
 func status(w http.ResponseWriter, r *http.Request) {
@@ -66,50 +66,29 @@ func updateUser(w http.ResponseWriter, r *http.Request) {
 	err := decoder.Decode(&params)
 	if err != nil {
 		log.Print(err)
-		respondWithError(w, 500, "Something went wrong")
+		respondWithError(w, 500, InternalErrorMsg)
 		return
 	}
 
 	token := getTokenFromHeader(r)
-	claims, err := jwt.ParseWithClaims(token, &jwt.RegisteredClaims{}, func(token *jwt.Token) (interface{}, error) {
-		if token.Method != jwt.SigningMethodHS256 {
-			// Not sure if this should be fatal or not
-			log.Fatalf("Token Method: %v want: %v", token.Method, jwt.SigningMethodHS256)
-		}
-		return []byte(config.jwtSecret), nil
-	})
-
+	id, err := authorize.GetIdFromJwt(token, config.jwtSecret)
 	if err != nil {
 		log.Print(err)
-		respondWithError(w, 401, "Unathorized")
-		return
-	}
-
-	idString, err := claims.Claims.GetSubject()
-	if err != nil {
-		log.Print(err)
-		respondWithError(w, 401, "Unathorized")
-		return
-	}
-
-	id, err := strconv.Atoi(idString)
-	if err != nil {
-		log.Print(err)
-		respondWithError(w, 401, "Unathorized")
+		respondWithError(w, 500, InternalErrorMsg)
 		return
 	}
 
 	passwordHash, err := bcrypt.GenerateFromPassword([]byte(params.Password), bcrypt.DefaultCost)
 	if err != nil {
 		log.Print(err)
-		respondWithError(w, 500, "Something went wrong")
+		respondWithError(w, 500, InternalErrorMsg)
 		return
 	}
 
 	user, err := db.GetUserById(id)
 	if err != nil {
 		log.Print(err)
-		respondWithError(w, 500, "Something went wrong")
+		respondWithError(w, 500, InternalErrorMsg)
 		return
 	}
 
@@ -119,30 +98,11 @@ func updateUser(w http.ResponseWriter, r *http.Request) {
 	err = db.UpdateUser(user)
 	if err != nil {
 		log.Print(err)
-		respondWithError(w, 500, "Something went wrong")
+		respondWithError(w, 500, InternalErrorMsg)
 		return
 	}
 
 	respondWithJson(w, 200, database.User{Id: id, Email: params.Email})
-}
-
-func CreateJwt(id int, expiresRequest int) (string, error) {
-	expires := 60 * 60
-	if expiresRequest < expires && expiresRequest != 0 {
-		expires = expiresRequest
-	}
-
-	claim := jwt.RegisteredClaims{Issuer: "chirpy",
-		IssuedAt:  jwt.NewNumericDate(time.Now().UTC()),
-		ExpiresAt: jwt.NewNumericDate(time.Now().UTC().Add(time.Duration(expires * int(time.Second)))),
-		Subject:   fmt.Sprint(id)}
-
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claim)
-	jwtToken, err := token.SignedString([]byte(config.jwtSecret))
-	if err != nil {
-		return "", err
-	}
-	return jwtToken, nil
 }
 
 func getTokenFromHeader(r *http.Request) string {
@@ -164,14 +124,15 @@ func postLogin(w http.ResponseWriter, r *http.Request) {
 	decoder := json.NewDecoder(r.Body)
 	err := decoder.Decode(&params)
 	if err != nil {
-		respondWithError(w, 500, "failed to decode JSON")
+		log.Print(err)
+		respondWithError(w, 500, InternalErrorMsg)
 		return
 	}
 
 	user, err := db.GetUser(params.Email)
 	if err != nil {
 		log.Printf("postLogin: %s\n", err)
-		respondWithError(w, 500, "failed to decode JSON")
+		respondWithError(w, 500, InternalErrorMsg)
 		return
 	}
 
@@ -180,29 +141,26 @@ func postLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	jwtToken, err := CreateJwt(user.Id, params.ExpiresInSeconds)
+	jwtToken, err := authorize.CreateJwt(user.Id, params.ExpiresInSeconds, config.jwtSecret)
 	if err != nil {
 		log.Print(err)
-		respondWithError(w, 500, "something went wrong")
+		respondWithError(w, 500, InternalErrorMsg)
 		return
 	}
 
-	var rndValue [32]byte
-	_, err = rand.Read(rndValue[:])
+	refreshToken, err := authorize.CreateRefreshToken()
 	if err != nil {
 		log.Print(err)
-		respondWithError(w, 500, "something went wrong")
+		respondWithError(w, 500, InternalErrorMsg)
 		return
 	}
-
-	refreshToken := hex.EncodeToString(rndValue[:])
 
 	user.RefreshToken = refreshToken
 	user.TokenExpiresAt = time.Now().UTC().Add(60 * 24 * time.Hour)
 	err = db.UpdateUser(user)
 	if err != nil {
 		log.Print(err)
-		respondWithError(w, 500, "something went wrong")
+		respondWithError(w, 500, InternalErrorMsg)
 		return
 	}
 
@@ -220,34 +178,19 @@ func refreshJWT(w http.ResponseWriter, r *http.Request) {
 	log.Print("--- refreshJWT ---")
 	token := getTokenFromHeader(r)
 
-	users, err := db.GetUsers()
+	validToken, currentUser, err := authorize.ValidateRefreshToken(token, db)
 	if err != nil {
 		log.Print(err)
-		respondWithError(w, 500, "something went wrong")
+		respondWithError(w, 500, InternalErrorMsg)
 		return
-	}
-
-	validToken := false
-	var currentUser database.UserDatabase
-
-	for _, user := range users {
-		if user.RefreshToken == token {
-			if user.TokenExpiresAt.After(time.Now().UTC()) {
-				validToken = true
-				currentUser = user
-			} else {
-				log.Print("time miss match")
-			}
-			break
-		}
 	}
 
 	jwtToken := ""
 	if validToken {
-		jwtToken, err = CreateJwt(currentUser.Id, 0)
+		jwtToken, err = authorize.CreateJwt(currentUser.Id, 0, config.jwtSecret)
 		if err != nil {
 			log.Print(err)
-			respondWithError(w, 500, "something went wrong")
+			respondWithError(w, 500, InternalErrorMsg)
 			return
 		}
 	} else {
@@ -269,7 +212,7 @@ func revokeToken(w http.ResponseWriter, r *http.Request) {
 	users, err := db.GetUsers()
 	if err != nil {
 		log.Print(err)
-		respondWithError(w, 500, "something went wrong")
+		respondWithError(w, 500, InternalErrorMsg)
 		return
 	}
 
@@ -293,7 +236,7 @@ func revokeToken(w http.ResponseWriter, r *http.Request) {
 	err = db.UpdateUser(currentUser)
 	if err != nil {
 		log.Print(err)
-		respondWithError(w, 500, "something went wrong")
+		respondWithError(w, 500, InternalErrorMsg)
 		return
 	}
 
@@ -312,13 +255,15 @@ func postUsers(w http.ResponseWriter, r *http.Request) {
 	decoder := json.NewDecoder(r.Body)
 	err := decoder.Decode(&params)
 	if err != nil {
-		respondWithError(w, 500, "failed to decode JSON")
+		log.Print(err)
+		respondWithError(w, 500, InternalErrorMsg)
 		return
 	}
 
 	alreadyExist, err := db.UserExist(params.Email)
 	if err != nil {
-		respondWithError(w, 500, "something went wrong")
+		log.Print(err)
+		respondWithError(w, 500, InternalErrorMsg)
 		return
 	}
 
@@ -330,13 +275,13 @@ func postUsers(w http.ResponseWriter, r *http.Request) {
 	passwordHash, err := bcrypt.GenerateFromPassword([]byte(params.Password), bcrypt.DefaultCost)
 	if err != nil {
 		log.Print(err)
-		respondWithError(w, 500, "Something went wrong")
+		respondWithError(w, 500, InternalErrorMsg)
 		return
 	}
 	email, err := db.CreateUser(params.Email, passwordHash)
 	if err != nil {
 		log.Println(err)
-		respondWithError(w, 500, "something went wrong")
+		respondWithError(w, 500, InternalErrorMsg)
 	}
 
 	respondWithJson(w, 201, email)
@@ -344,13 +289,21 @@ func postUsers(w http.ResponseWriter, r *http.Request) {
 
 func postChirps(w http.ResponseWriter, r *http.Request) {
 	log.Print("--- postChirps ---")
+
+	token := getTokenFromHeader(r)
+	if token == "" {
+		respondWithError(w, 401, "Unauthorized")
+	}
+
+	userId, err := authorize.GetIdFromJwt(token, config.jwtSecret)
+
 	type parameters struct {
 		Body string `json:"body"`
 	}
 
 	decoder := json.NewDecoder(r.Body)
 	params := parameters{}
-	err := decoder.Decode(&params)
+	err = decoder.Decode(&params)
 	if err != nil {
 		log.Printf("Error decoding parameters: %s\n", err)
 		respondWithError(w, 400, "Invalid JSON data")
@@ -361,10 +314,11 @@ func postChirps(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	chirp, err := db.CreateChirp(validate.ProfaneFilter(params.Body))
+	chirp := database.Chirp{Id: 0, Body: validate.ProfaneFilter(params.Body), AuthorId: userId}
+	chirp, err = db.CreateChirp(chirp)
 	if err != nil {
 		log.Println(err)
-		respondWithError(w, 500, "something went wrong")
+		respondWithError(w, 500, InternalErrorMsg)
 	}
 
 	respondWithJson(w, 201, chirp)
@@ -375,25 +329,67 @@ func getChirps(w http.ResponseWriter, r *http.Request) {
 	chirps, err := db.GetChirps()
 	if err != nil {
 		log.Print(err)
-		respondWithError(w, 500, "something went wrong")
+		respondWithError(w, 500, InternalErrorMsg)
 	}
 
 	respondWithJson(w, 200, chirps)
 }
 
+func deleteChirp(w http.ResponseWriter, r *http.Request) {
+	token := getTokenFromHeader(r)
+	userId, err := authorize.GetIdFromJwt(token, config.jwtSecret)
+	if err != nil {
+		log.Print(err)
+		respondWithError(w, 403, "Unauthorized")
+		return
+	}
+
+	path := r.PathValue("chirpID")
+	chirpId, err := strconv.Atoi(path)
+	if err != nil {
+		log.Print(err)
+		respondWithError(w, 500, InternalErrorMsg)
+		return
+	}
+
+	chirp, err := db.GetChirpById(chirpId)
+	if err != nil {
+		log.Print(err)
+		respondWithError(w, 500, InternalErrorMsg)
+		return
+	}
+
+	if chirp.AuthorId != userId {
+		log.Printf("chrip author id: %v, user id: %v", chirp.AuthorId, userId)
+		respondWithError(w, 403, "Unauthorized")
+		return
+	}
+
+	err = db.DeleteChirp(chirp.Id)
+	if err != nil {
+		log.Print(err)
+		respondWithError(w, 500, InternalErrorMsg)
+		return
+	}
+
+	respondWithJson(w, 204, "")
+}
+
 func getChirp(w http.ResponseWriter, r *http.Request) {
 	log.Print("--- getChirp ---")
+
 	path := r.PathValue("chirpID")
-	fmt.Println(path)
 	value, err := strconv.Atoi(path)
 	if err != nil {
-		respondWithError(w, 500, "could not convert to int")
+		log.Print(err)
+		respondWithError(w, 500, InternalErrorMsg)
 		return
 	}
 
 	chirps, err := db.GetChirps()
 	if err != nil {
-		respondWithError(w, 500, "Failed to load chirps from database")
+		log.Print(err)
+		respondWithError(w, 500, InternalErrorMsg)
 		return
 	}
 	if value > len(chirps) {
@@ -490,6 +486,7 @@ func main() {
 	serverHandler.HandleFunc("PUT /api/users", updateUser)
 	serverHandler.HandleFunc("POST /api/refresh", refreshJWT)
 	serverHandler.HandleFunc("POST /api/revoke", revokeToken)
+	serverHandler.HandleFunc("DELETE /api/chirps/{chirpID}", deleteChirp)
 
 	server := http.Server{Handler: serverHandler, Addr: ":" + port}
 

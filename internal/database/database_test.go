@@ -12,8 +12,8 @@ func TestDatabase(t *testing.T) {
 	const path = "./testDatabase.json"
 	os.Remove(path)
 
-	chirp1 := "this is a chirp"
-	chirp2 := "this is another chirp"
+	chirp1 := database.Chirp{Body: "this is a chirp", Id: 0, AuthorId: 1}
+	chirp2 := database.Chirp{Body: "this is another chirp", Id: 0, AuthorId: 2}
 
 	db, err := database.NewDB(path)
 	if err != nil {
@@ -28,8 +28,8 @@ func TestDatabase(t *testing.T) {
 	}
 
 	want := []database.Chirp{
-		{Id: 0, Body: "this is a chirp"},
-		{Id: 1, Body: "this is another chirp"},
+		{Id: 1, Body: "this is a chirp", AuthorId: 1},
+		{Id: 2, Body: "this is another chirp", AuthorId: 2},
 	}
 
 	if !reflect.DeepEqual(got, want) {
