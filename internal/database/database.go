@@ -16,13 +16,15 @@ type Chirp struct {
 }
 
 type User struct {
-	Email string `json:"email"`
-	Id    int    `json:"id"`
+	Email       string `json:"email"`
+	Id          int    `json:"id"`
+	IsChirpyRed bool   `json:"is_chirpy_red"`
 }
 
 type UserDatabase struct {
 	Email          string    `json:"email"`
 	Id             int       `json:"id"`
+	IsChirpyRed    bool      `json:"is_chirpy_red"`
 	PasswordHash   []byte    `json:"password_hash"`
 	RefreshToken   string    `json:"refresh_token"`
 	TokenExpiresAt time.Time `json:"token_expires_at"`
@@ -147,7 +149,7 @@ func (db *Database) CreateUser(email string, passwordHash []byte) (User, error) 
 		return User{}, err
 	}
 
-	newUser := UserDatabase{Id: len(data.Users) + 1, Email: email, PasswordHash: passwordHash}
+	newUser := UserDatabase{Id: len(data.Users) + 1, Email: email, PasswordHash: passwordHash, IsChirpyRed: false}
 	data.Users[len(data.Users)] = newUser
 	err = db.writeDB(data)
 	if err != nil {
@@ -186,19 +188,19 @@ func (db *Database) GetUser(email string) (UserDatabase, error) {
 	return UserDatabase{}, nil
 }
 
-func (db *Database) GetUserById(id int) (UserDatabase, error) {
+func (db *Database) GetUserById(id int) (UserDatabase, bool, error) {
 	users, err := db.GetUsers()
 	if err != nil {
-		return UserDatabase{}, fmt.Errorf("failed to get users to check if a user exist. %s", err)
+		return UserDatabase{}, false, fmt.Errorf("failed to get users to check if a user exist. %s", err)
 	}
 
 	for _, value := range users {
 		if id == value.Id {
-			return value, nil
+			return value, true, nil
 		}
 	}
 
-	return UserDatabase{}, nil
+	return UserDatabase{}, false, nil
 }
 
 func (db *Database) GetUsers() ([]UserDatabase, error) {

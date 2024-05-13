@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -85,10 +86,15 @@ func updateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, err := db.GetUserById(id)
+	user, found, err := db.GetUserById(id)
 	if err != nil {
 		log.Print(err)
 		respondWithError(w, 500, InternalErrorMsg)
+		return
+	}
+
+	if !found {
+		respondWithError(w, 404, "Not found")
 		return
 	}
 
@@ -102,7 +108,7 @@ func updateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	respondWithJson(w, 200, database.User{Id: id, Email: params.Email})
+	respondWithJson(w, 200, database.User{Id: id, Email: params.Email, IsChirpyRed: user.IsChirpyRed})
 }
 
 func getTokenFromHeader(r *http.Request) string {
@@ -169,9 +175,10 @@ func postLogin(w http.ResponseWriter, r *http.Request) {
 		Email        string `json:"email"`
 		Token        string `json:"token"`
 		RefreshToken string `json:"refresh_token"`
+		IsChirpyRed  bool   `json:"is_chirpy_red"`
 	}
 
-	respondWithJson(w, 200, UserWithjwt{Id: user.Id, Email: user.Email, Token: jwtToken, RefreshToken: refreshToken})
+	respondWithJson(w, 200, UserWithjwt{Id: user.Id, Email: user.Email, Token: jwtToken, RefreshToken: refreshToken, IsChirpyRed: user.IsChirpyRed})
 }
 
 func refreshJWT(w http.ResponseWriter, r *http.Request) {
@@ -330,10 +337,36 @@ func postChirps(w http.ResponseWriter, r *http.Request) {
 
 func getChirps(w http.ResponseWriter, r *http.Request) {
 	log.Print("--- getChirps ---")
+	var resultChrips []database.Chirp
+
 	chirps, err := db.GetChirps()
 	if err != nil {
 		log.Print(err)
 		respondWithError(w, 500, InternalErrorMsg)
+	}
+
+	authorId := r.URL.Query().Get("author_id")
+	if authorId != "" {
+		Id, err := strconv.Atoi(authorId)
+		if err != nil {
+			log.Print(err)
+			respondWithError(w, 500, "Failed to convert author_id to int")
+			return
+		}
+		for _, chirp := range chirps {
+			if chirp.AuthorId == Id {
+				resultChrips = append(resultChrips, chirp)
+			}
+		}
+	} else {
+		resultChrips = chirps
+	}
+
+	sortType := r.URL.Query().Get("sort")
+	if sortType == "desc" {
+		slices.Reverse(resultChrips)
+	} else if sortType != "asc" && sortType != "" {
+		respondWithError(w, 500, "Invaild sort")
 	}
 
 	respondWithJson(w, 200, chirps)
@@ -379,6 +412,59 @@ func deleteChirp(w http.ResponseWriter, r *http.Request) {
 	respondWithJson(w, 204, "")
 }
 
+func giveChirpyRed(w http.ResponseWriter, r *http.Request) {
+	log.Print("--- giveChirpyRed ---")
+	type parameter struct {
+		Event string `json:"event"`
+		Data  struct {
+			UserId int `json:"user_id"`
+		} `json:"data"`
+	}
+
+	token := getTokenFromHeader(r)
+	if token != config.polkaSecret {
+		respondWithError(w, 401, "Unauthorized")
+		return
+	}
+
+	params := parameter{}
+	decoder := json.NewDecoder(r.Body)
+	err := decoder.Decode(&params)
+	if err != nil {
+		log.Print(err)
+		respondWithError(w, 500, InternalErrorMsg)
+		return
+	}
+
+	if params.Event != "user.upgraded" {
+		respondWithJson(w, 200, "")
+		return
+	}
+
+	user, found, err := db.GetUserById(params.Data.UserId)
+	if err != nil {
+		log.Print(err)
+		respondWithError(w, 500, InternalErrorMsg)
+		return
+	}
+
+	if !found {
+		respondWithError(w, 404, "Not found")
+		return
+	}
+
+	user.IsChirpyRed = true
+
+	err = db.UpdateUser(user)
+	if err != nil {
+		log.Print(err)
+		respondWithError(w, 500, InternalErrorMsg)
+		return
+	}
+
+	respondWithJson(w, 200, "")
+}
+
 func getChirp(w http.ResponseWriter, r *http.Request) {
 	log.Print("--- getChirp ---")
 
@@ -414,6 +500,7 @@ func getChirp(w http.ResponseWriter, r *http.Request) {
 type apiConfig struct {
 	fileserverHits int
 	jwtSecret      string
+	polkaSecret    string
 }
 
 func (cfg *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -464,7 +551,7 @@ func main() {
 		log.Fatalf("Error loading .env file: %s", err)
 	}
 
-	config = apiConfig{fileserverHits: 0, jwtSecret: os.Getenv("JWT_SECRET")}
+	config = apiConfig{fileserverHits: 0, jwtSecret: os.Getenv("JWT_SECRET"), polkaSecret: os.Getenv("POLKA_SECRET")}
 
 	dbg := flag.Bool("debug", false, "Enable debug mode")
 	flag.Parse()
@@ -491,6 +578,7 @@ func main() {
 	serverHandler.HandleFunc("POST /api/refresh", refreshJWT)
 	serverHandler.HandleFunc("POST /api/revoke", revokeToken)
 	serverHandler.HandleFunc("DELETE /api/chirps/{chirpID}", deleteChirp)
+	serverHandler.HandleFunc("POST /api/polka/webhooks", giveChirpyRed)
 
 	server := http.Server{Handler: serverHandler, Addr: ":" + port}
 
